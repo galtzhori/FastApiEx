@@ -1,7 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Depends
 from datetime import datetime
+from database import engine, SessionLocal
+from models import UserInput, Indicators
+from sqlalchemy.orm import Session
 
-from models import UserInput, ResponseData, Indicators
+import models
 
 ################# RETURN MESSAGES ################
 serial_number_is_digits = "Bad serial number"
@@ -15,27 +18,49 @@ default_message = "I havent been told what to do in this case"
 
 
 app = FastAPI()
+models.Base.metadata.create_all(bind=engine)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @app.post("/process_input/")
-async def process_input(user_input: UserInput) -> str:
+async def process_input(user_input: UserInput, db: Session = Depends(get_db)) -> str:
     # Logic for calculating response status
     input_processor = ProcessInput(user_input)
     response = input_processor.check_serial_number()
-
-    # Save data to data table
-    # You can use a database ORM like SQLAlchemy to save data
-
-    # Get current date and time
-    current_time = datetime.now()
-
+    # update database
+    upload_to_database(user_input, response, db)
     # Return response data
     return response
 
 
-@app.get("/")
-async def read_root():
-    return {"message": "Hello, World!"}
+def upload_to_database(user_input: UserInput, response: str, db: Session = Depends(get_db)):
+    indicators = models.IndicatorList(indicator1=user_input.indicator_lights[0].value,
+                                      indicator2=user_input.indicator_lights[1].value,
+                                      indicator3=user_input.indicator_lights[2].value)
+    db.add(indicators)
+    db.commit()
+
+    form_input = models.FormInput(user_id=user_input.user_id, problem_description=user_input.problem_description,
+                                  device_serial_number=user_input.device_serial_number, indicator_list_id=indicators.id)
+    db.add(form_input)
+    db.commit()
+    form_input_object = db.query(models.FormInput).filter(
+        models.FormInput.form_input_id == form_input.form_input_id).first()
+    indicators.form_input_id = form_input_object.form_input_id
+    db.add(form_input)
+    db.commit()
+    form = models.Form(date=datetime.now(), response_status=response.split("\"")[1],
+                       form_input_id=form_input.form_input_id)
+    db.add(form)
+    db.commit()
+    # db.close()
 
 
 class ProcessInput:
